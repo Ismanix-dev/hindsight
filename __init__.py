@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -1563,6 +1564,135 @@ class HindsightMemoryProvider(MemoryProvider):
             reset,
             self._document_id,
         )
+
+    # -- native memory mirror + pre-compress checkpoint (Halo fork additions) ----
+
+    @staticmethod
+    def _mirror_tag(target: str, content: str) -> str:
+        """Deterministic reverse-lookup tag for one native-store entry (add writes
+        carry it so replace/remove can resolve the mirrored memory exactly)."""
+        digest = hashlib.sha256(f"{target}\x00{content}".encode("utf-8", "replace")).hexdigest()[:32]
+        return f"native-mirror:{target}:{digest}"
+
+    def _mirror_find_id(self, target: str, previous: str) -> Optional[str]:
+        """Resolve the Hindsight memory mirroring a native entry. Stage 1: exact tag
+        lookup. Stage 2: text search with an exact client-side match (covers entries
+        whose tag predates a replace). Returns None when no safe target is found."""
+        try:
+            resp = self._run_hindsight_operation(
+                lambda client: client.memory.list_memories(
+                    bank_id=self._bank_id, tags=[self._mirror_tag(target, previous)], limit=5
+                )
+            )
+            for item in getattr(resp, "items", None) or []:
+                if getattr(item, "id", None):
+                    return str(item.id)
+        except Exception as exc:
+            logger.debug("Hindsight mirror tag lookup failed: %s", exc)
+        try:
+            resp = self._run_hindsight_operation(
+                lambda client: client.alist_memories(
+                    bank_id=self._bank_id, search_query=previous[:200], limit=25
+                )
+            )
+        except Exception as exc:
+            logger.debug("Hindsight mirror search lookup failed: %s", exc)
+            return None
+        norm = " ".join(previous.split())
+        for item in getattr(resp, "items", None) or []:
+            text = str(getattr(item, "text", "") or "")
+            if text and " ".join(text.split()) == norm and getattr(item, "id", None):
+                return str(item.id)
+        return None
+
+    def on_memory_write(self, action: str, target: str, content: str,
+                        metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Mirror a built-in memory-tool write (MEMORY.md / USER.md) into Hindsight.
+
+        add -> async retain tagged for reverse lookup. replace -> resolve the mirrored
+        memory via ``metadata['previous_content']`` and patch its text. remove -> soft
+        retire it (state=invalidated, reversible). Fail-open and turn-safe: the work
+        runs on the writer queue, and anything unidentifiable (no exact target, missing
+        previous_content) is skipped with a debug log instead of guessing — a native
+        entry the server still holds is left untouched. ``auto_retain`` does not gate
+        this mirror: conversation retain and native-store mirroring are independent.
+        """
+        if action not in ("add", "replace", "remove") or target not in ("memory", "user") or not content:
+            return
+        if self._shutting_down.is_set():
+            return
+        if action == "add":
+            item = self._build_retain_kwargs(
+                content,
+                context=f"native memory mirror ({target})",
+                tags=[self._mirror_tag(target, content)],
+            )
+            self._enqueue_retain(lambda: self._retain_batch(item, bank_id=self._bank_id))
+            return
+
+        previous = str((metadata or {}).get("previous_content") or "")
+        if action == "replace":
+            if not previous:
+                logger.debug("Hindsight mirror replace skipped: no previous_content")
+                return
+            lookup = previous
+        else:  # remove: content carries the removed text
+            lookup = previous or content
+
+        def _job() -> None:
+            memory_id = self._mirror_find_id(target, lookup)
+            if not memory_id:
+                logger.debug("Hindsight mirror %s skipped: no exact target", action)
+                return
+            # Lazy: hindsight_client_api is a runtime dependency of an ACTIVE provider,
+            # never of discovery — the provider must stay importable without it.
+            from hindsight_client_api.models import UpdateMemoryRequest
+
+            if action == "replace":
+                self._run_hindsight_operation(
+                    lambda client: client.memory.update_memory(
+                        self._bank_id, memory_id, UpdateMemoryRequest(text=content)
+                    )
+                )
+                logger.debug("Hindsight mirror replace committed: memory=%s", memory_id)
+            else:
+                self._run_hindsight_operation(
+                    lambda client: client.memory.update_memory(
+                        self._bank_id,
+                        memory_id,
+                        UpdateMemoryRequest(state="invalidated", reason="native memory entry removed"),
+                    )
+                )
+                logger.debug("Hindsight mirror remove committed: memory=%s", memory_id)
+
+        self._enqueue_retain(_job)
+
+    pre_compress_checkpoint_api_version = 2
+
+    def on_pre_compress(self, messages, *, require_checkpoint: bool = False) -> str:
+        """Checkpoint the raw user/assistant transcript to Hindsight BEFORE the lossy
+        rewrite (bot-mode sessions clean up only via compression, so nothing else would
+        preserve the discarded turns). v2 contract: a successful return means the durable
+        checkpoint is committed, therefore any failure raises — the host only blocks the
+        compression when operators enable ``compression.checkpoint_required``. Same
+        transcript digest -> same document id -> idempotent on retry/overlap.
+        """
+        rows: List[str] = []
+        for message in messages or []:
+            if not isinstance(message, dict):
+                continue
+            role, text = message.get("role"), message.get("content")
+            if role in ("user", "assistant") and isinstance(text, str) and text.strip():
+                rows.append(f"{role}: {text}")
+        if not rows:
+            return ""
+        transcript = "\n".join(rows)
+        digest = hashlib.sha256(transcript.encode("utf-8", "replace")).hexdigest()[:16]
+        document_id = f"precompress-{self._session_id or 'session'}-{digest}"
+        item = self._build_retain_kwargs(transcript, context="pre-compress checkpoint", tags=["pre-compress"])
+        self._retain_batch(item, bank_id=self._bank_id, document_id=document_id, retain_async=False)
+        logger.debug("Hindsight pre-compress checkpoint committed: %s (%d rows)", document_id, len(rows))
+        return f"checkpoint: hindsight document {document_id} ({len(rows)} messages)"
 
     def _close_client(self) -> None:
         if self._mode != "local_embedded":
