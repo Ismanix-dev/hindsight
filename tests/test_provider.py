@@ -107,6 +107,18 @@ def test_context_mode_hides_tools_tools_mode_skips_recall(provider):
         "hindsight_retain",
         "hindsight_recall",
         "hindsight_reflect",
+        # Halo fork additions (layers 3b/3c): management + knowledge tools.
+        "hindsight_list_memories",
+        "hindsight_get_memory",
+        "hindsight_update_memory",
+        "hindsight_invalidate_memory",
+        "hindsight_get_knowledge_base_tree",
+        "hindsight_search_knowledge_base",
+        "hindsight_get_knowledge_page",
+        "hindsight_create_knowledge_folder",
+        "hindsight_create_knowledge_page",
+        "hindsight_update_knowledge_node",
+        "hindsight_delete_knowledge_node",
     ]
     assert tools_only.prefetch("anything") == ""
     assert fake.recalls == []
