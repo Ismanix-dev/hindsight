@@ -373,6 +373,188 @@ _SYSTEM_PROMPT_TAILS = {
 }
 
 
+# -- Halo fork additions: management + knowledge-base tool schemas (layers 3b/3c)
+
+LIST_MEMORIES_SCHEMA = {
+    "name": "hindsight_list_memories",
+    "description": (
+        "List stored memories with pagination so entries can be reviewed before editing. "
+        "Returns id, text, fact type, state and tags."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "q": {"type": "string", "description": "Optional text search within the bank."},
+            "type": {"type": "string", "description": "Fact type filter (world, experience, observation)."},
+            "limit": {"type": "integer", "description": "Page size, default 10."},
+            "offset": {"type": "integer", "description": "Pagination offset."},
+        },
+    },
+}
+
+GET_MEMORY_SCHEMA = {
+    "name": "hindsight_get_memory",
+    "description": "Fetch one memory unit in full: text, context, entities, state, dates, tags.",
+    "parameters": {
+        "type": "object",
+        "properties": {"memory_id": {"type": "string", "description": "ID of the memory to fetch."}},
+        "required": ["memory_id"],
+    },
+}
+
+UPDATE_MEMORY_SCHEMA = {
+    "name": "hindsight_update_memory",
+    "description": (
+        "Edit a stored memory to correct what was extracted. Only the fields you pass change. "
+        "Empty string clears context and dates; entities replaces the entity set ([] detaches all)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "ID of the memory to edit."},
+            "text": {"type": "string", "description": "Corrected fact text."},
+            "context": {"type": "string", "description": "Context label ('' clears it)."},
+            "occurred_start": {"type": "string", "description": "Event start, ISO-8601 ('' clears it)."},
+            "occurred_end": {"type": "string", "description": "Event end, ISO-8601 ('' clears it)."},
+            "fact_type": {"type": "string", "description": "Override fact type (world, experience, observation)."},
+            "entities": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Replace the entity set ([] detaches all).",
+            },
+            "resolve_entities": {"type": "boolean", "description": "Re-resolve entities from the new text (default true)."},
+        },
+        "required": ["memory_id"],
+    },
+}
+
+INVALIDATE_MEMORY_SCHEMA = {
+    "name": "hindsight_invalidate_memory",
+    "description": (
+        "Soft-retire a memory (excluded from recall, graph and consolidation, fully reversible) "
+        "or restore a retired one. Only raw world/experience facts can be retired."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "ID of the memory to retire or restore."},
+            "reason": {"type": "string", "description": "Why it is retired (recorded for audit)."},
+            "restore": {"type": "boolean", "description": "Restore a previously retired memory instead."},
+        },
+        "required": ["memory_id"],
+    },
+}
+
+KB_TREE_SCHEMA = {
+    "name": "hindsight_get_knowledge_base_tree",
+    "description": "Knowledge base as a nested folder/page tree; page bodies are not included.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
+KB_SEARCH_SCHEMA = {
+    "name": "hindsight_search_knowledge_base",
+    "description": "Hybrid search over knowledge pages.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "limit": {"type": "integer", "description": "Max results (1-50, default 10)."},
+        },
+        "required": ["query"],
+    },
+}
+
+KB_GET_PAGE_SCHEMA = {
+    "name": "hindsight_get_knowledge_page",
+    "description": "Fetch one knowledge page including its body.",
+    "parameters": {
+        "type": "object",
+        "properties": {"page_id": {"type": "string", "description": "ID of the page."}},
+        "required": ["page_id"],
+    },
+}
+
+KB_CREATE_FOLDER_SCHEMA = {
+    "name": "hindsight_create_knowledge_folder",
+    "description": "Create a knowledge-base folder.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Folder name."},
+            "parent_id": {"type": "string", "description": "Parent folder ID (omit to create at the root)."},
+        },
+        "required": ["name"],
+    },
+}
+
+KB_CREATE_PAGE_SCHEMA = {
+    "name": "hindsight_create_knowledge_page",
+    "description": (
+        "Create a knowledge-base page; its content is generated asynchronously from source_query. "
+        "Name must be unique within its folder."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Page name."},
+            "source_query": {"type": "string", "description": "The question the page answers (re-asked on refresh)."},
+            "parent_id": {"type": "string", "description": "Parent folder ID (omit to create at the root)."},
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional tags scoping which memories the page is built from (filter, not labels).",
+            },
+            "max_tokens": {"type": "integer", "description": "Content budget for the generated page."},
+        },
+        "required": ["name", "source_query"],
+    },
+}
+
+KB_UPDATE_NODE_SCHEMA = {
+    "name": "hindsight_update_knowledge_node",
+    "description": (
+        "Rename/move a knowledge folder or page and/or update a page's options. "
+        "Only the fields you pass change; source_query rebuilds the page."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "node_id": {"type": "string", "description": "Folder or page ID."},
+            "name": {"type": "string", "description": "New name."},
+            "parent_id": {"type": "string", "description": "New parent folder (empty string moves to root)."},
+            "source_query": {"type": "string", "description": "Pages only: new question (rebuilds the page)."},
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "Pages only: replaces tags ([] clears)."},
+            "max_tokens": {"type": "integer", "description": "Pages only: new content budget."},
+        },
+        "required": ["node_id"],
+    },
+}
+
+KB_DELETE_NODE_SCHEMA = {
+    "name": "hindsight_delete_knowledge_node",
+    "description": "Delete a knowledge folder or page and its whole subtree. Destructive.",
+    "parameters": {
+        "type": "object",
+        "properties": {"node_id": {"type": "string", "description": "Folder or page ID to delete."}},
+        "required": ["node_id"],
+    },
+}
+
+MANAGEMENT_TOOL_SCHEMAS = [
+    LIST_MEMORIES_SCHEMA,
+    GET_MEMORY_SCHEMA,
+    UPDATE_MEMORY_SCHEMA,
+    INVALIDATE_MEMORY_SCHEMA,
+    KB_TREE_SCHEMA,
+    KB_SEARCH_SCHEMA,
+    KB_GET_PAGE_SCHEMA,
+    KB_CREATE_FOLDER_SCHEMA,
+    KB_CREATE_PAGE_SCHEMA,
+    KB_UPDATE_NODE_SCHEMA,
+    KB_DELETE_NODE_SCHEMA,
+]
+
+
 class HindsightMemoryProvider(MemoryProvider):
     """Hindsight long-term memory with knowledge graph and multi-strategy retrieval."""
 
@@ -1451,7 +1633,7 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
+        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA, *MANAGEMENT_TOOL_SCHEMAS]
 
     def _tool_retain(self, args: dict) -> str:
         content, context = args["content"], args.get("context")
@@ -1479,18 +1661,162 @@ class HindsightMemoryProvider(MemoryProvider):
         logger.debug("Tool hindsight_reflect: response_len=%d", len(text))
         return text or "No relevant memories found."
 
+    # -- Halo fork: memory management + knowledge tools (layers 3b/3c) ----------
+
+    @staticmethod
+    def _dump(payload: Any) -> str:
+        """JSON for tool results; tolerates SDK models and datetimes."""
+        if hasattr(payload, "to_dict"):
+            payload = payload.to_dict()
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+    def _tool_list_memories(self, args: dict) -> str:
+        kwargs: Dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "limit": max(1, min(int(args.get("limit") or 10), 100)),
+            "offset": max(0, int(args.get("offset") or 0)),
+        }
+        if args.get("q"):
+            kwargs["q"] = args["q"]
+        if args.get("type"):
+            kwargs["type"] = args["type"]
+        resp = self._run_hindsight_operation(lambda client: client.memory.list_memories(**kwargs))
+        items = [
+            {
+                "id": getattr(unit, "id", None),
+                "text": getattr(unit, "text", None),
+                "fact_type": getattr(unit, "fact_type", None),
+                "state": getattr(unit, "state", None),
+                "tags": getattr(unit, "tags", None),
+                "date": getattr(unit, "date", None),
+            }
+            for unit in (getattr(resp, "items", None) or [])
+        ]
+        return self._dump({"total": getattr(resp, "total", None), "items": items})
+
+    def _tool_get_memory(self, args: dict) -> str:
+        resp = self._run_hindsight_operation(
+            lambda client: client.memory.get_memory(self._bank_id, args["memory_id"])
+        )
+        return self._dump(resp)
+
+    def _tool_update_memory(self, args: dict) -> str:
+        from hindsight_client_api.models import UpdateMemoryRequest
+
+        fields: Dict[str, Any] = {}
+        for key in ("text", "context", "occurred_start", "occurred_end", "fact_type"):
+            if args.get(key) is not None:
+                fields[key] = args[key]
+        if args.get("entities") is not None:
+            fields["entities"] = list(args["entities"])
+        if args.get("resolve_entities") is not None:
+            fields["resolve_entities"] = bool(args["resolve_entities"])
+        if not fields:
+            raise ValueError("no fields given (pass text/context/dates/fact_type/entities)")
+        self._run_hindsight_operation(
+            lambda client: client.memory.update_memory(
+                self._bank_id, args["memory_id"], UpdateMemoryRequest(**fields)
+            )
+        )
+        return "Memory updated."
+
+    def _tool_invalidate_memory(self, args: dict) -> str:
+        from hindsight_client_api.models import UpdateMemoryRequest
+
+        restore = bool(args.get("restore"))
+        fields: Dict[str, Any] = {"state": "valid" if restore else "invalidated"}
+        if args.get("reason"):
+            fields["reason"] = args["reason"]
+        self._run_hindsight_operation(
+            lambda client: client.memory.update_memory(
+                self._bank_id, args["memory_id"], UpdateMemoryRequest(**fields)
+            )
+        )
+        return "Memory restored." if restore else "Memory invalidated (soft-retired, reversible)."
+
+    def _tool_kb_tree(self, args: dict) -> str:
+        resp = self._run_hindsight_operation(lambda client: client.aget_knowledge_base_tree(self._bank_id))
+        return self._dump(resp)
+
+    def _tool_kb_search(self, args: dict) -> str:
+        resp = self._run_hindsight_operation(
+            lambda client: client.asearch_knowledge_base(
+                self._bank_id, args["query"], limit=int(args["limit"]) if args.get("limit") else None
+            )
+        )
+        return self._dump(resp)
+
+    def _tool_kb_get_page(self, args: dict) -> str:
+        resp = self._run_hindsight_operation(
+            lambda client: client.aget_knowledge_page(self._bank_id, args["page_id"])
+        )
+        return self._dump(resp)
+
+    def _tool_kb_create_folder(self, args: dict) -> str:
+        kwargs: Dict[str, Any] = {"bank_id": self._bank_id, "name": args["name"]}
+        if args.get("parent_id"):
+            kwargs["parent_id"] = args["parent_id"]
+        resp = self._run_hindsight_operation(lambda client: client.acreate_knowledge_folder(**kwargs))
+        return self._dump(resp)
+
+    def _tool_kb_create_page(self, args: dict) -> str:
+        kwargs: Dict[str, Any] = {
+            "bank_id": self._bank_id,
+            "name": args["name"],
+            "source_query": args["source_query"],
+        }
+        if args.get("parent_id"):
+            kwargs["parent_id"] = args["parent_id"]
+        if args.get("tags") is not None:
+            kwargs["tags"] = list(args["tags"])
+        if args.get("max_tokens"):
+            kwargs["max_tokens"] = int(args["max_tokens"])
+        resp = self._run_hindsight_operation(lambda client: client.acreate_knowledge_page(**kwargs))
+        return self._dump(resp)
+
+    def _tool_kb_update_node(self, args: dict) -> str:
+        kwargs: Dict[str, Any] = {"bank_id": self._bank_id, "node_id": args["node_id"]}
+        for key in ("name", "source_query"):
+            if args.get(key) is not None:
+                kwargs[key] = args[key]
+        if args.get("parent_id") is not None:
+            kwargs["parent_id"] = args["parent_id"] or None  # "" -> None = move to root
+        if args.get("tags") is not None:
+            kwargs["tags"] = list(args["tags"])
+        if args.get("max_tokens") is not None:
+            kwargs["max_tokens"] = int(args["max_tokens"])
+        resp = self._run_hindsight_operation(lambda client: client.aupdate_knowledge_node(**kwargs))
+        return self._dump(resp)
+
+    def _tool_kb_delete_node(self, args: dict) -> str:
+        self._run_hindsight_operation(
+            lambda client: client.adelete_knowledge_node(self._bank_id, args["node_id"])
+        )
+        return "Knowledge node deleted."
+
     # tool name -> (required arg, handler, user-facing failure prefix)
     _TOOL_HANDLERS = {
         "hindsight_retain": ("content", _tool_retain, "Failed to store memory"),
         "hindsight_recall": ("query", _tool_recall, "Failed to search memory"),
         "hindsight_reflect": ("query", _tool_reflect, "Failed to reflect"),
+        "hindsight_list_memories": ("", _tool_list_memories, "Failed to list memories"),
+        "hindsight_get_memory": ("memory_id", _tool_get_memory, "Failed to fetch memory"),
+        "hindsight_update_memory": ("memory_id", _tool_update_memory, "Failed to update memory"),
+        "hindsight_invalidate_memory": ("memory_id", _tool_invalidate_memory, "Failed to retire memory"),
+        "hindsight_get_knowledge_base_tree": ("", _tool_kb_tree, "Failed to fetch the knowledge tree"),
+        "hindsight_search_knowledge_base": ("query", _tool_kb_search, "Failed to search the knowledge base"),
+        "hindsight_get_knowledge_page": ("page_id", _tool_kb_get_page, "Failed to fetch the page"),
+        "hindsight_create_knowledge_folder": ("name", _tool_kb_create_folder, "Failed to create the folder"),
+        "hindsight_create_knowledge_page": ("name", _tool_kb_create_page, "Failed to create the page"),
+        "hindsight_update_knowledge_node": ("node_id", _tool_kb_update_node, "Failed to update the node"),
+        "hindsight_delete_knowledge_node": ("node_id", _tool_kb_delete_node, "Failed to delete the node"),
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if tool_name not in self._TOOL_HANDLERS:
             return tool_error(f"Unknown tool: {tool_name}")
         required, handler, failure = self._TOOL_HANDLERS[tool_name]
-        if not args.get(required, ""):
+        if required and not args.get(required, ""):
             return tool_error(f"Missing required parameter: {required}")
         try:
             return json.dumps({"result": handler(self, args)})
