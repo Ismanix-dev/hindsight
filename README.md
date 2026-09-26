@@ -1,14 +1,26 @@
-# Hindsight Memory Provider for Hermes Agent
+# Hindsight Memory Provider for Hermes Agent (Halo-Fork)
 
 Long-term memory with knowledge graph, entity resolution, and multi-strategy retrieval. Supports cloud, local embedded, and local external modes.
+
+> **Dies ist der Halo-Fork** (`github.com/Ismanix-dev/hindsight`, Branch `halo`), nicht das
+> Upstream-Plugin. Er trägt 14 Tools statt der Upstream-3 (Memory-Verwaltung + Knowledge-Base,
+> Halo-Stufen 3a–3d) und die Regel „Session-ID nur in Metadata, nie in Tags".
+> Upstream-Herkunft und Fork-Struktur: siehe [AGENTS.md](./AGENTS.md).
 
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) memory-provider plugin. It used to ship inside Hermes as `plugins/memory/hindsight/`; Nous Research moved every memory provider out of the core tree and handed this one over, so it now lives here and is maintained by the Hindsight team. This directory is the live source, and the Hermes catalog entry points here.
 
 ## Install
 
 ```bash
-hermes plugins install vectorize-io/hindsight/hindsight-integrations/hermes
+# Halo-Fork (lokal, so läuft es hier)
+hermes plugins install Ismanix-dev/hindsight        # Branch halo
 hermes memory setup    # select "hindsight"
+```
+
+Upstream-Installation (nicht die hier laufende Version):
+
+```bash
+hermes plugins install vectorize-io/hindsight/hindsight-integrations/hermes
 ```
 
 Dependencies in `pyproject.toml` are installed into the Hermes venv automatically and survive `hermes update`.
@@ -81,7 +93,11 @@ Points the plugin at an existing Hindsight instance you're already running (Dock
 
 ## Config
 
-Config file: `~/.hermes/hindsight/config.json`
+Config file (pro Profil): `~/.hermes/profiles/<profile>/hindsight/config.json`
+
+Der Provider liest `$HERMES_HOME/hindsight/config.json` — bei aktiven Profilen ist das
+`~/.hermes/profiles/<profile>/hindsight/config.json`. Existiert die Datei dort nicht, fällt
+der Loader auf `~/.hindsight/config.json` und danach auf Umgebungsvariablen zurück.
 
 ### Connection
 
@@ -89,6 +105,9 @@ Config file: `~/.hermes/hindsight/config.json`
 |-----|---------|-------------|
 | `mode` | `cloud` | `cloud`, `local_embedded`, or `local_external` |
 | `api_url` | `https://api.hindsight.vectorize.io` | API URL (cloud and local_external modes) |
+| `apiKey` | — | API key (Alias `api_key`); leer im lokalen Betrieb |
+| `timeout` | `120` | Client-Timeout in Sekunden |
+| `idle_timeout` | `300` | Idle-Timeout für Daemon-/Client-Lebenszyklus |
 
 ### Memory Bank
 
@@ -114,6 +133,7 @@ Config file: `~/.hermes/hindsight/config.json`
 | `auto_recall` | `true` | Automatically recall memories before each turn |
 | `recall_sync` | `false` | Recall synchronously against the *current* message each turn (higher relevance, adds recall latency). Default off: recall runs in the background and is injected on the next turn. |
 | `recall_indicator` | `true` | Show a `👁️ Hindsight — recalled N memories` status line when auto-recall injects memory. Turn off for customer-facing agents. |
+| `observation_scopes` | `combined` | How observations are scoped during consolidation: `combined` (one pass over all tags) or `per_tag` |
 
 > **Behavior change — `recall_types` defaults to `observation` only.**
 >
@@ -136,6 +156,8 @@ Config file: `~/.hermes/hindsight/config.json`
 | `retain_indicator` | `true` | Show a `👁️ Hindsight — saving to memory…` status line when a turn is saved. Turn off for customer-facing agents. |
 | `retain_user_prefix` | `User` | Label used before user turns in auto-retained transcripts |
 | `retain_assistant_prefix` | `Assistant` | Label used before assistant turns in auto-retained transcripts |
+| `prefetch_waits_for_retain` | `true` | Der Prefetch des nächsten Turns wartet (begrenzt, außerhalb des Antwortpfads) auf den Drain der Retain-Queue |
+| `prefetch_retain_drain_timeout` | `10.0` | Obergrenze in Sekunden für dieses Warten |
 
 ### Integration
 
@@ -169,11 +191,44 @@ file that already holds one.
 
 Available in `hybrid` and `tools` memory modes:
 
+**Kern (Upstream):**
+
 | Tool | Description |
 |------|-------------|
 | `hindsight_retain` | Store information with auto entity extraction; supports optional per-call `tags` |
 | `hindsight_recall` | Multi-strategy search (semantic + entity graph) |
 | `hindsight_reflect` | Cross-memory synthesis (LLM-powered) |
+
+**Fork-Erweiterung — Memory-Verwaltung (Halo-Stufe 3b):**
+
+| Tool | Description |
+|------|-------------|
+| `hindsight_list_memories` | Memories einer Bank auflisten/filtern |
+| `hindsight_get_memory` | Eine Memory-Einheit per ID lesen |
+| `hindsight_update_memory` | Extrahierte Memory-Einheit korrigieren |
+| `hindsight_invalidate_memory` | Memory-Einheit soft-retiren (oder wiederherstellen) |
+
+**Fork-Erweiterung — Knowledge-Base (Halo-Stufe 3c):**
+
+| Tool | Description |
+|------|-------------|
+| `hindsight_get_knowledge_base_tree` | Knowledge-Base als verschachtelten Baum lesen |
+| `hindsight_search_knowledge_base` | Knowledge-Pages per Relevanz finden (hybrid) |
+| `hindsight_get_knowledge_page` | Eine Knowledge-Page als Markdown lesen |
+| `hindsight_create_knowledge_folder` | Ordner in der Knowledge-Base anlegen |
+| `hindsight_create_knowledge_page` | Knowledge-Page anlegen (lebendes Dokument) |
+| `hindsight_update_knowledge_node` | Ordner/Page umbenennen, verschieben, Inhalt ändern |
+| `hindsight_delete_knowledge_node` | Ordner/Page samt Inhalt löschen |
+
+**Gesamt: 14 Tools.** Die Tool-Oberfläche wird in `tests/test_provider.py` gegen genau diese
+Menge asserted.
+
+### Tags und Metadata (Fork-Regel)
+
+`retain_tags` aus der Config sind die einzigen festen Tags (`agent:<name>` plus freie
+Entity-Tags). **Session-IDs landen nie in Tags** — Session-Herkunft liegt ausschließlich in
+`metadata.session_id` / `metadata.parent_session_id`. Die Bank-Aufteilung (`halo`, `halo-dev`)
+und die Tag-Konvention dokumentiert [AGENTS.md](./AGENTS.md).
 
 ## Environment Variables
 
