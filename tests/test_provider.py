@@ -28,7 +28,9 @@ def test_sync_turn_retains_the_turn(provider):
     assert call["document_id"] == "session-1"  # stable id + append on a capable API
     item = _retain_item(fake)
     assert item["update_mode"] == "append"
-    assert "hermes" in item["tags"] and "session:session-1" in item["tags"]
+    assert "hermes" in item["tags"] and not any(t.startswith("session:") for t in item["tags"])
+    # Session lineage is metadata-only (audit data), never a tag.
+    assert item["metadata"]["session_id"] == "session-1"
     messages = json.loads(item["content"][1:-1])
     assert [m["content"] for m in messages] == ["User: what is my name?", "Assistant: Ada."]
 

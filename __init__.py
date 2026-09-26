@@ -1110,7 +1110,8 @@ class HindsightMemoryProvider(MemoryProvider):
         # Gated presentation for automatic startup warnings (agent._emit_warning on CLI).
         self._warning_callback = kwargs.get("warning_callback") if callable(kwargs.get("warning_callback")) else None
         self._platform = str(kwargs.get("platform") or "cli")
-        # session_id stays in tags so processes for one session remain filterable together.
+        # Session-ID lives ONLY in metadata (per _METADATA_ATTRS), never in tags:
+        # tags are reserved for configured retain_tags + free entity tags.
         self._document_id = _mint_document_id(self._session_id)
         _maybe_upgrade_client()
 
@@ -1530,8 +1531,12 @@ class HindsightMemoryProvider(MemoryProvider):
         writer runs after later sync_turn() calls mutate _session_turns/_turn_index/_session_id."""
         content = "[" + ",".join(turns) + "]"
         metadata = self._build_metadata(message_count=len(turns) * 2, turn_index=self._turn_index)
-        lineage = (("session", self._session_id), ("parent", self._parent_session_id))
-        tags = [f"{kind}:{sid}" for kind, sid in lineage if sid] or None
+        # Session lineage belongs in metadata only — session IDs are audit data,
+        # not tags (tags stay clean: retain_tags config + extracted entity tags).
+        for key, value in (("session_id", self._session_id), ("parent_session_id", self._parent_session_id)):
+            if value:
+                metadata[key] = value
+        tags = None
         bank_id, retain_async, retain_context = self._bank_id, self._retain_async, self._retain_context
 
         def _job() -> None:
@@ -1840,7 +1845,8 @@ class HindsightMemoryProvider(MemoryProvider):
         Without this hook, initialize()-cached state (``_session_id``, ``_document_id``, ``_session_turns``,
         ``_turn_counter``) would keep pointing at the previous session and writes would land in the wrong
         document. See hermes-agent#6672.
-        Always update ``_session_id`` so metadata and tags on subsequent retains reflect the active session.
+        Always update ``_session_id`` so metadata on subsequent retains reflects the active session
+        (session lineage is metadata-only — tags never carry a session id).
         Always clear the accumulated batch buffers (``_session_turns``, ``_turn_counter``, ``_turn_index``)
         — even for /resume and /branch, the new session's batching must start from zero so an in-flight
         retain doesn't flush under the wrong ``_document_id``. See #1303.
