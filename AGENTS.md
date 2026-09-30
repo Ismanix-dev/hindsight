@@ -31,23 +31,107 @@ Anweisungen, die dorthin zeigen, gelten hier nicht.
 ## Betriebsregeln des Forks
 
 ### Session-ID gehört NUR in die Metadata
-Tags sind reserviert für `retain_tags` aus der Config und extrahierte Entity-Tags.
 Eine `session:<ID>`- oder `parent:<ID>`-Tag darf **nie** entstehen — Session-Herkunft
 ist Audit-Daten und liegt in `metadata.session_id` / `metadata.parent_session_id`.
+`_METADATA_ATTRS` in `__init__.py` ist die verbindliche Liste.
+
+### Zwei Tag-Quellen
+1. **`agent:<name>` aus `retain_tags`** (Profil-`config.json`). Das Plugin merged
+   `retain_tags` unbedingt in jedes Retain-Payload (`_build_retain_kwargs`). Verifiziert:
+   raz → `tags: ["agent:raz"]`, nemo → `["agent:nemo"]`, devi → `["agent:devi"]`.
+2. **Entity-Tags aus `entity_labels`** — serverseitig. `_inject_label_tags` projiziert
+   **nur** Label-Gruppen mit `tag: true` in die `tags`-Spalte. **Frei-form Entities
+   erzeugen KEINE Tags**; sie landen ausschließlich im Entity-Graph
+   (`entities` / `unit_entities`). Ohne `entity_labels` gibt es serverseitig keine Tags.
+
+Beleg (zwei Kontrollbänke, Retain ohne `tags` im Payload): mit
+`entities_allow_free_form: true` entstanden `Alice`, `Acme Corp`, `Kubernetes`, `AWS`,
+`Rust`, `QML` als **Entities** — die Tags blieben `agent:test` + `work:imp`. Frei-form
+Entities und Tags sind also getrennte Kanäle.
+
+### Agent-Tags sperren — `accept_agent_tags` (Halo-Fork)
+Die obigen zwei Quellen sind **nicht** die einzige Tag-Herkunft. Das
+`hindsight_retain`-Tool trägt einen `tags`-Parameter, den der Agent frei befüllt; das
+Plugin merged ihn via `_build_retain_kwargs`. Daraus stammen die Badge-Trauben der
+Halo-Profile (real beobachtet in `halo-dev`):
+
+```
+auto (sync_turn) → ["agent:devi"]
+Tool-Call        → ["agent:devi","taurid","ops","worker","rust","tauri","ipc","kanban-protokoll"]
+```
+
+Steuerung über `accept_agent_tags` (Profil-`hindsight/config.json`, Default `true`):
+
+* **`false`** → das Tool verwirft `args["tags"]` und **entfernt `tags` aus dem
+  Schema** (ein angebotenes, aber ignoriertes Feld kostet Tokens und führt das Modell in
+  die Irre). Damit bleibt pro Retain nur `retain_tags` + die Server-Label-Tags.
+* Gesperrt wird **nur am Tool-Pfad**, nicht in `_build_retain_kwargs`: derselbe Builder
+  bedient Auto-Retain, den Native-Store-Mirror und den Pre-Compress-Checkpoint, deren
+  Tags **intern** sind. Zentrales Verwerfen würde den Reverse-Lookup des Mirrors
+  (`_mirror_tag` → `native-mirror:<target>:<sha>`) zerstören.
+* `entities_allow_free_form` berührt diesen Kanal **nicht** — es steuert die
+  Entity-Extraktion, nicht die Tags.
+
+`metadata.agent_identity` wird zusätzlich gestempelt, ersetzt aber nie den Tag — gefiltert
+wird über `tags`.
 
 ### Tag-Konvention
-- Tags: nur `agent:<name>` (aus `retain_tags`) plus freie Entity-Tags.
-- **cherub trägt keinen Tag** — bewusste Ausnahme, damit seine Memories bankweit sichtbar bleiben.
-- Alle anderen Profile: `retain_tags = agent:<name>`, `recall_tags = agent:<name>`.
+| Profil | `retain_tags` | `recall_tags` | `agent:<name>`-Tag |
+|---|---|---|---|
+| cherub | *(leer)* | *(leer)* | **nein** — bewusst, damit bankweit sichtbar |
+| raz, nemo | `agent:<name>` | `agent:<name>` | ja |
+| devi, appsec, fronti, revi, taurid, tester | `agent:<name>` | `agent:<name>` | ja |
+
+Alle Profile bekommen zusätzlich die Entity-Tags ihrer Bank/Strategie — auch cherub.
+
+### Entity-Labels — die eigentliche Tag-Quelle
+`entities_allow_free_form` steht bewusst auf **`false`** — bankweit **und** in jeder Strategie
+(`halo`/`standard`, `halo`/`raz`, `halo`/`nemo`, `halo-dev`/`coding`): nur die Label-Werte
+werden extrahiert, keine frei erfundenen Named Entities. Tags entstehen ohnehin **nur** aus
+den Label-Gruppen (`tag: true`).
+Die Gruppen liegen **zweistufig**: bankweit (Default `standard`) **und** je Strategie.
+`apply_strategy` **ersetzt** `entity_labels`, es mergt nicht — eine Strategie ohne eigene
+Labels fällt auf die Bank-Gruppen zurück, eine Strategie mit `entity_labels: []` löscht sie.
+
+| Ebene | Gruppen |
+|---|---|
+| `halo` bankweit (`standard`) | 14: akki, cherb, speci, recht, ernae, sozia, kommu, priva, infra, mem, plugi, platf, konve, entsc |
+| `halo` — Strategie `raz` | 10: text, urt, uebe, krit, kano, exeg, quel, geo, zeit, disk |
+| `halo` — Strategie `nemo` | 11: klasse, dosis, form, wirk, ziel, einn, inter, zykl, evid, belast, quel |
+| `halo-dev` bankweit (`coding`) | 12: work, code, stck, test, revi, secu, meth, depl, perf, conf, task, repo |
 
 ### Banken
-| Bank | Profile | `retain_strategies` | `retain_default_strategy` |
+| Bank | Profile | `retain_default_strategy` | Strategien |
 |---|---|---|---|
-| `halo` | cherub, raz, nemo | `nemo`, `raz` | `standard` (built-in) |
+| `halo` | cherub, raz, nemo | `standard` | `raz`, `nemo` |
 | `halo-dev` | devi, appsec, fronti, revi, taurid, tester | `coding` | `coding` |
 
-`agent` und `strategy` in der Profil-`config.json` sind **inerte Felder** — das Plugin liest sie
-nicht und sendet keine Strategie an den Server; die Bank entscheidet.
+### `strategy` — verdrahtet (Retain-Strategie je Profil)
+Das Plugin liest `strategy` aus der Profil-`config.json` und sendet es als **Item-Feld**
+(`_build_retain_kwargs`), damit der Server die passende `retain_strategies`-Fassung
+auflöst statt der Bank-Defaults.
+
+* `""` bzw. `"standard"` → **kein** Key: die Bank-Config gilt direkt (`standard` ist der
+  eingebaute „keine benannte Strategie"-Selektor, den der Server nicht kennt; er wird
+  client-seitig zu `""` normalisiert).
+* Ein Name, der weder in `{coding, raz, standard}` noch in den `retain_strategies`-Keys
+  der Bank steht, **blockiert jeden Retain** (laut, kein stiller Fallback) — geprüft im
+  zentralen `_retain_batch`.
+* Die Bank weitet die eingebaute Liste per **Union** (`_bank_strategy_names`, gecacht,
+  Fehler nie fatal): eine neu in der Bank angelegte Strategie funktioniert ohne
+  Client-Änderung.
+
+| Profil | `strategy` | wirksame Gruppen |
+|---|---|---|
+| cherub | `""` | `standard` → 14 Bank-Gruppen |
+| nemo | `nemo` | 11 nemo-Gruppen |
+| raz | `raz` | 10 raz-Gruppen |
+| devi, appsec, fronti, revi, taurid, tester | `coding` | 12 coding-Gruppen |
+
+> **Kein Netz-Lookup aus `__init__`.** `_apply_retain_policy({})` läuft aus `__init__`
+> **vor** `_apply_connection_settings`; ein Bank-Lookup dort cached den Client gegen die
+> Default-Cloud-URL und jede spätere Abfrage läuft ins 401. Der Bank-Lookup passiert
+> ausschließlich auf dem Versandpfad.
 
 ### Modus
 Alle Profile laufen `local_external` gegen `http://localhost:9177`.

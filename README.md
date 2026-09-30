@@ -6,7 +6,6 @@ Long-term memory with knowledge graph, entity resolution, and multi-strategy ret
 > Upstream-Plugin. Er trägt 14 Tools statt der Upstream-3 (Memory-Verwaltung + Knowledge-Base,
 > Halo-Stufen 3a–3d) und die Regel „Session-ID nur in Metadata, nie in Tags".
 > Upstream-Herkunft und Fork-Struktur: siehe [AGENTS.md](./AGENTS.md).
-
 A [Hermes Agent](https://github.com/NousResearch/hermes-agent) memory-provider plugin. It used to ship inside Hermes as `plugins/memory/hindsight/`; Nous Research moved every memory provider out of the core tree and handed this one over, so it now lives here and is maintained by the Hindsight team. This directory is the live source, and the Hermes catalog entry points here.
 
 ## Install
@@ -225,10 +224,30 @@ Menge asserted.
 
 ### Tags und Metadata (Fork-Regel)
 
-`retain_tags` aus der Config sind die einzigen festen Tags (`agent:<name>` plus freie
-Entity-Tags). **Session-IDs landen nie in Tags** — Session-Herkunft liegt ausschließlich in
-`metadata.session_id` / `metadata.parent_session_id`. Die Bank-Aufteilung (`halo`, `halo-dev`)
-und die Tag-Konvention dokumentiert [AGENTS.md](./AGENTS.md).
+Es gibt **zwei** Tag-Quellen:
+
+1. **`agent:<name>` aus `retain_tags`** (Profil-`config.json`). Das Plugin merged `retain_tags`
+   unbedingt in jedes Retain-Payload — raz → `["agent:raz"]`, nemo → `["agent:nemo"]`,
+   devi → `["agent:devi"]`. **cherub trägt bewusst keinen Tag** (bankweit sichtbar).
+2. **Entity-Tags aus `entity_labels` mit `tag: true`** — serverseitig per
+   `_inject_label_tags`. Frei-form Entities erzeugen **nie** Tags; sie landen im Entity-Graph.
+
+**Session-IDs landen nie in Tags** — Session-Herkunft liegt ausschließlich in
+`metadata.session_id` / `metadata.parent_session_id`. `metadata.agent_identity` wird
+zusätzlich gestempelt, ersetzt aber nie den `agent:<name>`-Tag — gefiltert wird über `tags`.
+
+`entities_allow_free_form` steht bewusst auf `false` — bankweit und je Strategie: nur die
+Label-Werte werden extrahiert, keine frei erfundenen Named Entities. Tags entstehen trotzdem
+nur aus den Label-Gruppen (`tag: true`). Die Gruppen liegen zweistufig —
+bankweit für `standard` und je Strategie; `apply_strategy` **ersetzt** `entity_labels`,
+es mergt nicht. Bank-Aufteilung, Gruppen und die `strategy`-Einschränkung:
+[AGENTS.md](./AGENTS.md).
+
+> **`strategy` ist verdrahtet.** Das Plugin sendet `strategy` aus der Profil-`config.json`
+> als Item-Feld; der Server löst die passende `retain_strategies`-Fassung auf.
+> `""`/`"standard"` sendet keinen Key (Bank-Default). Ein unbekannter Name blockiert alle
+> Retains (Union aus eingebauter Liste und Bank-Keys). Gruppen je Profil: `raz` 10,
+> `nemo` 11, `coding` 12, `standard` = 14 Bank-Gruppen.
 
 ## Environment Variables
 

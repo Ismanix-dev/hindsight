@@ -173,12 +173,19 @@ class FakeReflectResponse:
 class FakeClient:
     """Records the calls the plugin makes against the Hindsight client."""
 
-    def __init__(self, recall_texts=(), reflect_text=""):
+    def __init__(self, recall_texts=(), reflect_text="", retain_strategies=None):
         self.retains: list[dict] = []
         self.recalls: list[dict] = []
         self.reflects: list[dict] = []
+        self.bank_config_calls: list[str] = []
         self._recall_texts = list(recall_texts)
         self._reflect_text = reflect_text
+        self._retain_strategies = retain_strategies or {}
+        self.banks = self  # client.banks.get_bank_config(...)
+
+    async def get_bank_config(self, bank_id):
+        self.bank_config_calls.append(bank_id)
+        return {"bank_id": bank_id, "config": {"retain_strategies": self._retain_strategies}}
 
     async def aretain_batch(self, **kwargs):
         self.retains.append(kwargs)

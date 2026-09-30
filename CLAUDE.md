@@ -72,12 +72,30 @@ tests/`. Diese Suite ist groß und langsam; sie läuft hier nicht routinemäßig
 ## Konventionen des Forks
 
 - **Session-IDs nie in Tags.** Session-Herkunft gehört in `metadata.session_id` /
-  `metadata.parent_session_id`. Tags tragen nur `retain_tags` (`agent:<name>`) und freie
-  Entity-Tags. `_METADATA_ATTRS` ist die verbindliche Liste.
+  `metadata.parent_session_id`. `_METADATA_ATTRS` ist die verbindliche Liste.
+- **Zwei Tag-Quellen, nicht drei.**
+  1. `agent:<name>` aus `retain_tags` — das Plugin merged es unbedingt in jedes Payload.
+  2. Entity-Tags aus `entity_labels` mit `tag: true` — **nur serverseitig**.
+  Frei-form Entities werden **nie** zu Tags; sie landen im Entity-Graph. „Freie Entity-Tags"
+  gibt es nicht. `metadata.agent_identity` ergänzt, ersetzt aber nicht den Tag.
+- **`entities_allow_free_form: false`** in beiden Banken — bankweit und in jeder Strategie.
+  Nur die Label-Werte werden extrahiert; frei erfundene Named Entities entfallen. Tags
+  kommen weiterhin ausschließlich aus den Label-Gruppen (`tag: true`).
+- **Entity-Labels zweistufig.** `apply_strategy` **ersetzt** `entity_labels` (kein Merge):
+  bankweit für `standard`, zusätzlich je Strategie (`raz` 10, `nemo` 11, `coding` 12).
+- **`strategy` ist verdrahtet.** Das Plugin liest `strategy` aus der Profil-`config.json`
+  und sendet es als Item-Feld; der Server löst dann die passende `retain_strategies`-Fassung
+  auf. `""`/`"standard"` → kein Key (Bank-Default). Unbekannte Namen blockieren alle Retains
+  (Union aus eingebauter Liste und Bank-Keys, siehe AGENTS.md).
+- **`agent` ist inert.** Wird nicht gelesen; `agent_identity` kommt vom Core (initialize),
+  der `agent:<name>`-Tag aus `retain_tags`.
 - **Keine 0.10.0-Halo-Patches zurückholen.** `allow_retain_tags` und
   `title_first_turn_immediate` sind tote Felder (definiert, nie gelesen); der
   Strategie-Merge-Patch in `config_resolver.py` verhinderte das Löschen von Strategien.
   Der Fork läuft bewusst ohne sie.
+- **Achtung `retain_strategies` wird ersetzt, nicht gemergt** (kein Merge-Patch im
+  installierten Server). Beim Setzen von Strategien die **vollständige** Map senden,
+  sonst gehen Missionen und andere Strategien verloren.
 - **Keine Auto-Titel.** Automatische Session-Namen und Document-Titel sind im Fork abgeschafft.
 - `config_schema.py` importiert absichtlich aus `plugins.memory.config_schema` — nicht vendorn.
 - `pyproject.toml` ist die einzige Abhängigkeits-Autorität (`hindsight-client>=0.10.1,<1`).

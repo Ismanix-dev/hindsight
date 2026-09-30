@@ -57,6 +57,7 @@ from .settings import (
     _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
     _PROVIDER_DEFAULT_MODELS,
     _VALID_BUDGETS,
+    _VALID_RETAIN_STRATEGIES,
     _daemon_llm_provider,
     _normalize_observation_scopes,
     _normalize_retain_tags,
@@ -92,6 +93,21 @@ def _scoped_setting(name: str, default: str = "") -> str:
     except UnscopedSecretError:
         return default
     return default if value is None else value
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    """Config/env truthiness. Only an explicit false-y literal turns a default-on
+    knob off; anything unrecognized falls back to *default* (never raises)."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off", ""):
+        return False
+    return default
 
 
 def _cloud_api_key(config: dict) -> str:
@@ -594,6 +610,15 @@ class HindsightMemoryProvider(MemoryProvider):
         self._atexit_registered = False
         self._retain_tags: List[str] = []
         self._tags: list[str] | None = None
+        # Retain strategy: the bank resolves one extraction contract per key
+        # (retain_strategies). A configured-but-unknown key aborts every retain
+        # (loud, no silent fallback); an empty value only means the bank default.
+        self._retain_strategy = ""
+        self._retain_strategy_error = ""
+        # Bank-defined strategy names, keyed by bank id (read lazily on the
+        # shipping path — never from __init__, where the API URL is not yet set).
+        self._strategy_names_cache: dict[str, set[str]] = {}
+        self._strategy_block_warned = False
         self._retain_source = _DEFAULT_RETAIN_SOURCE
         self._retain_user_prefix, self._retain_assistant_prefix = "User", "Assistant"
         self._turn_counter = self._turn_index = 0
@@ -1147,10 +1172,11 @@ class HindsightMemoryProvider(MemoryProvider):
 
             client_version = pkg_version("hindsight-client")
         logger.info(
-            "Hindsight initialized: mode=%s, api_url=%s, bank=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
+            "Hindsight initialized: mode=%s, api_url=%s, bank=%s, strategy=%s, budget=%s, memory_mode=%s, prefetch_method=%s, client=%s",
             self._mode,
             self._api_url,
             self._bank_id,
+            self._retain_strategy or "-",
             self._budget,
             self._memory_mode,
             self._prefetch_method,
@@ -1242,15 +1268,46 @@ class HindsightMemoryProvider(MemoryProvider):
         # On by default so the user SEES memory working whether or not the model
         # mentions it; off switch for customer-facing agents (recall_indicator too).
         self._retain_indicator = bool(cfg.get("retain_indicator", True))
+        # Halo fork: accept per-call ``tags`` from the agent's hindsight_retain tool?
+        # Off drops the agent's tag list (the ``worker``/``rust``/``ipc`` flood) while
+        # keeping every internal tag source: configured retain_tags, the server-side
+        # label projection, and the auto-retain/mirror/checkpoint paths, which never
+        # route through the tool. Default True keeps upstream behaviour.
+        self._accept_agent_tags = _as_bool(cfg.get("accept_agent_tags", True), True)
         # The next turn's warm prefetch could read BEFORE an async retain is
         # recall-visible; when True it first waits (bounded, off the reply path)
         # for the queue to drain AND the server-side op(s) to complete.
         self._prefetch_waits_for_retain = cfg.get("prefetch_waits_for_retain", True)
         self._prefetch_retain_drain_timeout = float(cfg.get("prefetch_retain_drain_timeout", 10.0))
+        # Retain strategy: the bank resolves one extraction contract per key
+        # (retain_strategies). An unknown key aborts every retain (loud, no silent
+        # fallback); ``standard`` is the built-in "no named strategy" selector and
+        # is normalised to "" so it never ships to the server (which has no such key
+        # and would log "Unknown retain strategy 'standard'" on every retain).
+        raw_strategy = str(cfg.get("strategy") or "").strip().lower()
+        if raw_strategy == "standard":
+            raw_strategy = ""
+        self._retain_strategy, self._retain_strategy_error = raw_strategy, ""
+        # Validated against the built-in list here and widened by the bank on the
+        # shipping path (``_retain_blocked_reason``). ``_bank_strategy_names`` is a
+        # NETWORK call and this method also runs from ``__init__``
+        # (``_apply_retain_policy({})``), BEFORE ``_apply_connection_settings`` has set
+        # ``_api_url``/``_bank_id``. Resolving the bank there would create the cached
+        # client against the default cloud URL and every later call would talk to the
+        # wrong host. So the bank is consulted on the shipping path only.
+        if raw_strategy and raw_strategy not in _VALID_RETAIN_STRATEGIES:
+            # Not necessarily fatal: the bank may define this key (union resolved on the
+            # shipping path). Recorded here, warned only when it actually blocks.
+            self._retain_strategy_error = (
+                f"unknown retain strategy {raw_strategy!r} "
+                f"(valid: {', '.join(sorted(_VALID_RETAIN_STRATEGIES))})")
 
     def _apply_recall_settings(self, cfg: dict) -> None:
         """Recall knobs are pure config too (``{}`` yields the defaults)."""
-        self._recall_tags = cfg.get("recall_tags") or None
+        # Normalisieren (Liste + Comma-String-Parität), sonst tritt ein String wie
+        # "agent:devi" direkt in den Request und der Server-Pydantic (list[str])
+        # verweigert das Recall — wie devi 30.09.2026 geschehen.
+        self._recall_tags = _normalize_retain_tags(cfg.get("recall_tags")) or None
         self._recall_tags_match = cfg.get("recall_tags_match", "any")
         self._auto_recall = cfg.get("auto_recall", True)
         self._recall_sync = bool(cfg.get("recall_sync", False))
@@ -1267,6 +1324,57 @@ class HindsightMemoryProvider(MemoryProvider):
             self._recall_types = list([] if configured_types is None else configured_types) or ["observation"]
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
+
+    def _bank_strategy_names(self, bank_id: str) -> set[str]:
+        """The ``retain_strategies`` keys the bank actually defines.
+
+        The bank is the source of truth for valid strategy names: the server resolves
+        any key present there (``config_resolver.apply_strategy``) and only warns about
+        unknown ones. A client that knows less than the bank would block retains the
+        server would accept — so this reads instead of guessing. Same pattern as the
+        bank flag readers. Returns ``set()`` when the bank is unreachable or defines
+        nothing; a failure is never fatal."""
+        cached = self._strategy_names_cache.get(bank_id)
+        if cached is not None:
+            return cached
+        names: set[str] = set()
+        try:
+            cfg = self._run_hindsight_operation(
+                lambda client: client.banks.get_bank_config(bank_id=bank_id)
+            )
+            # The client returns {bank_id, config, overrides}; tolerate a plain object
+            # or a config dict without the wrapper as well.
+            raw = getattr(cfg, "config", None)
+            if raw is None and isinstance(cfg, dict):
+                raw = cfg.get("config", cfg)
+            if not isinstance(raw, dict):
+                raw = getattr(cfg, "retain_strategies", None)
+            if isinstance(raw, dict):
+                raw = raw.get("retain_strategies")
+            if isinstance(raw, dict):
+                names = {str(k).strip().lower() for k in raw if str(k).strip()}
+        except Exception as exc:
+            logger.debug("Hindsight strategy-name lookup failed for bank %r: %s", bank_id, exc)
+        if names:
+            self._strategy_names_cache[bank_id] = names
+        return names
+
+    def _retain_blocked_reason(self) -> str | None:
+        """Why a retain must not run (``None`` = allowed). Only an invalid configured
+        retain strategy blocks: shipping an unknown key would silently fall back to the
+        bank default, so an explicit typo fails loudly instead.
+
+        The bank is the authoritative source of valid names, so a strategy created on
+        the bank works without a client change. The built-in list is the offline
+        fallback and the UNION is what counts — ``standard`` is deliberately not a bank
+        key and stays valid even when the bank defines other strategies. Resolved here,
+        on the shipping path, because the lookup is a network call."""
+        if not self._retain_strategy_error:
+            return None
+        bank_names = self._bank_strategy_names(self._bank_id)
+        if bank_names and self._retain_strategy in (set(_VALID_RETAIN_STRATEGIES) | bank_names):
+            return None
+        return self._retain_strategy_error or None
 
     def _start_embedded_daemon(self) -> None:
         """Start the embedded daemon on a background thread (Rich output -> log file)."""
@@ -1507,14 +1615,24 @@ class HindsightMemoryProvider(MemoryProvider):
         }
         merged_tags = _normalize_retain_tags(list(self._retain_tags) + _normalize_retain_tags(tags))
         item.update({k: v for k, v in (("context", context), ("update_mode", update_mode)) if v is not None})
-        item.update({k: v for k, v in (("tags", merged_tags), ("observation_scopes", self._observation_scopes)) if v})
+        # Per-item retain strategy: selects the bank's retain_strategies entry. Never
+        # the built-in ``standard`` (normalised to "" in _apply_retain_policy) — the
+        # server has no such key and would log a warning per retain.
+        item.update({k: v for k, v in (("tags", merged_tags), ("observation_scopes", self._observation_scopes), ("strategy", self._retain_strategy or None)) if v})
         return item
 
     def _retain_batch(
         self, item: dict, *, bank_id: str, document_id: str | None = None, retain_async: bool | None = None
     ):
         """Dispatch one item via aretain_batch (bank_id/document_id/retain_async are
-        call-level args, never item keys)."""
+        call-level args, never item keys). Central choke point: an invalid retain
+        strategy blocks every path (auto, tool, mirror, checkpoint) here."""
+        if (blocked := self._retain_blocked_reason()) is not None:
+            if not self._strategy_block_warned:
+                self._strategy_block_warned = True
+                logger.warning("Hindsight: %s — every retain is aborted until the config is fixed",
+                               blocked)
+            return None
         kwargs: Dict[str, Any] = {
             "bank_id": bank_id,
             "items": [item],
@@ -1638,12 +1756,37 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- tools -------------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA, *MANAGEMENT_TOOL_SCHEMAS]
+        if self._memory_mode == "context":
+            return []
+        if self._accept_agent_tags:
+            return [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA, *MANAGEMENT_TOOL_SCHEMAS]
+        # Halo fork: with agent tags refused, the parameter is dropped from the schema too —
+        # an advertised-then-ignored field costs tokens and misleads the model.
+        retain = {
+            **RETAIN_SCHEMA,
+            "parameters": {
+                **RETAIN_SCHEMA["parameters"],
+                "properties": {
+                    k: v for k, v in RETAIN_SCHEMA["parameters"]["properties"].items() if k != "tags"
+                },
+            },
+        }
+        return [retain, RECALL_SCHEMA, REFLECT_SCHEMA, *MANAGEMENT_TOOL_SCHEMAS]
 
     def _tool_retain(self, args: dict) -> str:
         content, context = args["content"], args.get("context")
+        # Halo fork: per-call agent tags are gated here, not in _build_retain_kwargs —
+        # the same builder serves auto-retain, the native-store mirror and the
+        # pre-compress checkpoint, whose tags are internal. Dropping them centrally
+        # would break the mirror's reverse lookup (_mirror_tag).
+        tags = args.get("tags") if self._accept_agent_tags else None
+        if not self._accept_agent_tags and args.get("tags"):
+            logger.debug(
+                "Tool hindsight_retain: dropped %d agent tag(s) (accept_agent_tags=false)",
+                len(args["tags"]) if isinstance(args["tags"], list) else 1,
+            )
         item = self._build_retain_kwargs(
-            content, context=context, tags=args.get("tags"), occurred_at=args.get("occurred_at")
+            content, context=context, tags=tags, occurred_at=args.get("occurred_at")
         )
         logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s", self._bank_id, len(content), context)
         self._retain_batch(item, bank_id=self._bank_id)

@@ -208,3 +208,76 @@ def test_warning_sink_defaults_exist_without_initialize():
     bare = plugin.HindsightMemoryProvider()
     assert bare._warning_callback is None
     assert bare._platform == "cli"
+
+
+# -- retain strategy (bank-scoped) ---------------------------------------------
+
+
+def test_retain_sends_configured_strategy(provider):
+    """A configured strategy ships as an item field so the bank resolves that
+    retain_strategies entry instead of its default."""
+    instance, fake = provider({"strategy": "raz"})
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert _retain_item(fake)["strategy"] == "raz"
+
+
+def test_absent_strategy_sends_no_key(provider):
+    """No configured strategy -> no item key, so the bank default applies."""
+    instance, fake = provider({})
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert "strategy" not in _retain_item(fake)
+
+
+def test_standard_is_normalized_away(provider):
+    """``standard`` is the built-in "no named strategy" selector; the server has no
+    such key, so it must not be shipped (it would log a warning per retain)."""
+    instance, fake = provider({"strategy": "standard"})
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert instance._retain_strategy == ""
+    assert "strategy" not in _retain_item(fake)
+
+
+def test_unknown_strategy_blocks_retain(provider):
+    """An unknown key fails loudly and aborts every retain instead of silently
+    falling back to the bank default."""
+    instance, fake = provider({"strategy": "bogus"})
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert fake.retains == []
+    assert "unknown retain strategy" in instance._retain_strategy_error
+
+
+def test_bank_defined_strategy_is_accepted(provider):
+    """A strategy that exists on the bank works without a client change: the bank
+    widens the built-in list (union), resolved on the shipping path."""
+    instance, fake = provider(
+        {"strategy": "bibelforschung"},
+        client=FakeClient(retain_strategies={"bibelforschung": {"retain_mission": "x"}}),
+    )
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert _retain_item(fake)["strategy"] == "bibelforschung"
+    assert fake.bank_config_calls  # the bank was actually consulted
+
+
+def test_standard_survives_a_bank_that_defines_only_raz(provider):
+    """Regression: the built-in list is the UNION with the bank keys, not a
+    replacement. Otherwise the bank's first own strategy would invalidate
+    ``standard`` and break every other profile's retain."""
+    instance, fake = provider(
+        {"strategy": "standard"},
+        client=FakeClient(retain_strategies={"raz": {"retain_mission": "x"}}),
+    )
+    instance.sync_turn("frage", "antwort")
+    instance.shutdown()
+
+    assert fake.retains  # standard stayed valid
+    assert "strategy" not in _retain_item(fake)

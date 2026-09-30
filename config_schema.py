@@ -1,6 +1,7 @@
 """Hindsight's declared config surface — rendered by the generic desktop panel."""
 
 from plugins.memory.config_schema import (
+    KIND_BOOL,
     KIND_SECRET,
     KIND_SELECT,
     KIND_TEXT,
@@ -54,6 +55,33 @@ CONFIG_SCHEMA = ProviderConfigSchema(
             aliases=("budget",),
             options=tuple(ProviderFieldOption(b, b) for b in ("low", "mid", "high")),
             inline=True,
+        ),
+        ProviderField(
+            key="strategy",
+            label="Retain strategy",
+            kind=KIND_SELECT,
+            default="standard",
+            aliases=("retainStrategy",),
+            description=(
+                "Retain strategy sent with every retain payload; must match a "
+                "retain_strategies key on the bank. 'standard' uses the bank's resolved "
+                "config (no named strategy). An unknown value blocks all retains."
+            ),
+            options=tuple(ProviderFieldOption(s, s) for s in ("standard", "raz", "coding")),
+            inline=True,
+        ),
+        ProviderField(
+            key="accept_agent_tags",
+            label="Accept agent tags",
+            kind=KIND_BOOL,
+            default=True,
+            aliases=("acceptAgentTags",),
+            description=(
+                "Off: the agent's own tags on hindsight_retain are dropped (and the "
+                "parameter is hidden from the tool schema). Configured retain_tags, "
+                "server-side entity-label tags and the automatic retain/mirror/"
+                "checkpoint tags are unaffected."
+            ),
         ),
     ),
 )

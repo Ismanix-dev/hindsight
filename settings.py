@@ -30,6 +30,11 @@ _HINDSIGHT_GLYPH = "👁️"
 # (vectorize-io/hindsight#932).
 _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
+# Built-in retain-strategy names. `standard` is NOT a bank key but the
+# "no named strategy" selector: the server resolves the bank's own config.
+# The bank's `retain_strategies` keys widen this set at runtime (union), so a
+# strategy created on the bank works without a client change.
+_VALID_RETAIN_STRATEGIES = {"coding", "raz", "standard"}
 _PROVIDER_DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
     "anthropic": "claude-haiku-4-5",
